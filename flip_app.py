@@ -1,32 +1,71 @@
 # flip_app.py
 # --------------------------------------------------------------
-# Flip App – Price Compare & ROI (Cloud‑ready)
-# - Streamlit UI (auto in cloud) + CLI (local)
-# - Prevents blank screen on Streamlit Cloud (no blocking input)
-# - Short HTTP timeouts + guarded rendering with st.exception
+# Plug‑and‑play navodila za zagon v oblaku (brez lokalne namestitve)
 # --------------------------------------------------------------
+# 🅰 Streamlit Community Cloud (priporočeno za 1 klik)
+# 1) Ustvari nov javni GitHub repo, npr. `flip-app`.
+# 2) V repo dodaj ta `flip_app.py` in datoteko `requirements.txt` z vsebino spodaj.
+# 3) Pojdi na https://streamlit.io/cloud → "New app" → poveži repo → izberi `flip_app.py` → Deploy.
+# 4) App bo dosegljiv kot URL (deliš ga ali uporabiš sam).
+#
+# 🅱 Hugging Face Spaces (tudi brezplačno)
+# 1) Ustvari Space → izberi SDK = Streamlit.
+# 2) V Space naloži `flip_app.py` in `requirements.txt`.
+# 3) Spaces samodejno zažene app.
+#
+# 📦 requirements.txt (kopiraj v ločeno datoteko v repo):
+# --------------------------------------------------------------
+# streamlit>=1.36
+# requests>=2.31
+# beautifulsoup4>=4.12
+# lxml>=4.9
+# pandas>=2.0
+# numpy>=1.24
+# --------------------------------------------------------------
+# Opombe:
+# - Na Streamlit Cloud/Spaces ni treba konfigurirati porta; okolje to uredi samo.
+# - Če strani uvedejo zaščite proti scrapingu, app morda ne dobi rezultatov; uporabi zmerno in skladno s Pogoji uporabe.
+# - Če želiš, lahko dodamo gumb za odpiranje Google Shopping/eBay strani namesto scrapinga.
+# --------------------------------------------------------------
+# Mini aplikacija za primerjavo cen + ROI z **Streamlit (če je na voljo)** ali **CLI** načinom.
+# Popravljeno, da se ob manjkajočih argumentih **ne konča z `SystemExit: 2`** (argparse),
+# ampak ponudi **interaktivni vnos** ali prijazno sporočilo z navodili.
+#
+# ➤ UI način:  `pip install streamlit`  →  `streamlit run flip_app.py`
+# ➤ CLI način: `python flip_app.py --query "iPhone 12 64GB" --listing-price 180 --shipping 5 --fees-pct 12 --extra-costs 10`
+#              `python flip_app.py --url "https://..." --listing-price 180 ...`
+# ➤ Brez argumentov: skripta v CLI **ne vrže napake**, temveč te pozove k interaktivnemu vnosu (če je mogoče),
+#    ali izpiše navodila in se lepo zaključi.
+#
+# POMEMBNO: Scraping lahko krši pogoje uporabe posameznih strani. Uporabi odgovorno in za osebno rabo.
 
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import sys
 import time
 from dataclasses import dataclass
 from statistics import mean
-from typing import Dict, List, Optional, Tuple
+from typing import List, Dict, Optional, Tuple
 
 import requests
 from bs4 import BeautifulSoup
 
-# Optional deps
+# Poskusi uvoziti dodatne knjižnice; delovanje brez njih naj ostane možno
 try:
     import pandas as pd  # type: ignore
     PANDAS_AVAILABLE = True
 except Exception:
     pd = None  # type: ignore
     PANDAS_AVAILABLE = False
+
+try:
+    import numpy as np  # type: ignore
+    NUMPY_AVAILABLE = True
+except Exception:
+    np = None  # type: ignore
+    NUMPY_AVAILABLE = False
 
 try:
     import streamlit as st  # type: ignore
@@ -43,27 +82,22 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-# Shorter timeouts so Cloud never hangs long
+# Global timeout (shorter to avoid long white screens in Cloud)
 HTTP_TIMEOUT = 6  # seconds
 
+# --------------------------------------------------------------
+# Helperji
+# --------------------------------------------------------------
 
-# --------------------------- Helpers ---------------------------
 def clean_price(text: str) -> Optional[float]:
-    """Convert various currency formats into float."""
+    """Pretvori različne oblike cen v float. Vrne None, če ne uspe."""
     if not text:
         return None
     t = re.sub(r"[\n\r\t]", " ", text).replace("\xa0", " ")
-    m = re.findall(r"[0-9][0-9\.,\s'–-]*", t)
+    m = re.findall(r"[0-9][0-9\.,\s]*", t)
     if not m:
         return None
-    cand = (
-        m[0]
-        .strip()
-        .replace(" ", "")
-        .replace("–", "")
-        .replace("-", "")
-        .replace("'", "")
-    )
+    cand = m[0].strip().replace(" ", "")
     if "," in cand and "." in cand:
         if cand.rfind(",") > cand.rfind("."):
             cand = cand.replace(".", "").replace(",", ".")
@@ -108,8 +142,12 @@ class DealCosts:
         return self.listing_price + self.shipping + self.estimate_fees() + self.extra_costs
 
 
-# --------------------------- Sources ---------------------------
+# --------------------------------------------------------------
+# Viri podatkov
+# --------------------------------------------------------------
+
 def search_ebay(query: str, sold: bool = False, limit: int = 10) -> List[Dict]:
+    """Vrne sezname compov: title, price, url, source."""
     q = requests.utils.quote(query)
     if sold:
         url = f"https://www.ebay.com/sch/i.html?_nkw={q}&LH_Sold=1&LH_Complete=1"
@@ -132,14 +170,12 @@ def search_ebay(query: str, sold: bool = False, limit: int = 10) -> List[Dict]:
             url_item = link_el.get("href")
             if price is None:
                 continue
-            out.append(
-                {
-                    "title": title,
-                    "price": price,
-                    "url": url_item,
-                    "source": f"eBay {'Sold' if sold else 'Active'}",
-                }
-            )
+            out.append({
+                "title": title,
+                "price": price,
+                "url": url_item,
+                "source": f"eBay {'Sold' if sold else 'Active'}",
+            })
             if len(out) >= limit:
                 break
         return out
@@ -169,14 +205,12 @@ def search_bolha(query: str, limit: int = 10) -> List[Dict]:
             price = clean_price(price_el.get_text())
             if price is None:
                 continue
-            out.append(
-                {
-                    "title": title,
-                    "price": price,
-                    "url": href,
-                    "source": "Bolha (active)",
-                }
-            )
+            out.append({
+                "title": title,
+                "price": price,
+                "url": href,
+                "source": "Bolha (active)",
+            })
             if len(out) >= limit:
                 break
         return out
@@ -184,15 +218,40 @@ def search_bolha(query: str, limit: int = 10) -> List[Dict]:
         return out
 
 
-# --------------------------- Compute ---------------------------
+# --------------------------------------------------------------
+# Izračuni
+# --------------------------------------------------------------
+
+def split_comps(comps: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
+    """Vrne (active, sold) razdelitev compov."""
+    active = [c for c in comps if "Sold" not in str(c.get("source", ""))]
+    sold = [c for c in comps if "Sold" in str(c.get("source", ""))]
+    return active, sold
+
+
+def best_active_offer(comps: List[Dict]) -> Optional[Dict]:
+    """Najde najnižjo ceno med *aktivnimi* ponudbami (eBay Active, Bolha)."""
+    active, _ = split_comps(comps)
+    active = [c for c in active if isinstance(c.get("price"), (int, float))]
+    if not active:
+        return None
+    return min(active, key=lambda c: c["price"])  # najcenejša aktivna = najboljša za nakup
+
+
+def best_sold_offer(comps: List[Dict]) -> Optional[Dict]:
+    """Najde najvišjo ceno med *Sold* (referenca za ciljno prodajno ceno)."""
+    _, sold = split_comps(comps)
+    sold = [c for c in sold if isinstance(c.get("price"), (int, float))]
+    if not sold:
+        return None
+    return max(sold, key=lambda c: c["price"])  # najvišja sold = optimistična referenca
+
+
 def market_average(comps: List[Dict]) -> Tuple[Optional[float], str]:
+    """Povprečje iz eBay Sold, če obstaja; sicer iz vseh compov."""
     if not comps:
         return None, "Ni compov"
-    sold_prices = [
-        c["price"]
-        for c in comps
-        if isinstance(c.get("price"), (int, float)) and "Sold" in str(c.get("source", ""))
-    ]
+    sold_prices = [c["price"] for c in comps if isinstance(c.get("price"), (int, float)) and "Sold" in str(c.get("source", ""))]
     if sold_prices:
         return float(mean(sold_prices)), "eBay Sold"
     prices = [c["price"] for c in comps if isinstance(c.get("price"), (int, float))]
@@ -205,19 +264,22 @@ def roi_summary(costs: DealCosts, market_avg: Optional[float]) -> Dict[str, floa
     est_fees = costs.estimate_fees()
     total = costs.total_cost()
     if market_avg is None:
-        return {
-            "market_avg": float("nan"),
-            "est_fees": est_fees,
-            "total_cost": total,
-            "profit": float("nan"),
-            "roi": float("nan"),
-        }
+        return {"market_avg": float("nan"), "est_fees": est_fees, "total_cost": total, "profit": float("nan"), "roi": float("nan")}
     profit = market_avg - total
     roi = (profit / total * 100.0) if total > 0 else float("nan")
-    return {"market_avg": market_avg, "est_fees": est_fees, "total_cost": total, "profit": profit, "roi": roi}
+    return {
+        "market_avg": market_avg,
+        "est_fees": est_fees,
+        "total_cost": total,
+        "profit": profit,
+        "roi": roi,
+    }
 
 
-# --------------------------- Streamlit UI ---------------------------
+# --------------------------------------------------------------
+# STREAMLIT UI (le če je nameščen)
+# --------------------------------------------------------------
+
 def run_streamlit_app() -> None:
     st.set_page_config(page_title="Flip Compare & ROI", page_icon="💸", layout="wide")
     st.title("💸 Mini Flip App — primerjava cen + ROI")
@@ -264,10 +326,16 @@ def run_streamlit_app() -> None:
             if not comps:
                 st.error("Ni najdenih primerjav (poskusi drugačen izraz ali ročno preverjanje).")
             else:
+                # Povprečja/ROI
                 avg, src = market_average(comps)
                 costs = DealCosts(listing_price, shipping, fees_pct, extra_costs)
                 summary = roi_summary(costs, avg)
 
+                # Najboljše ponudbe
+                best_buy = best_active_offer(comps)
+                best_sell = best_sold_offer(comps)
+
+                # Tabela compov
                 c1, c2 = st.columns([2, 1])
                 with c1:
                     st.subheader("Primerjave (comps)")
@@ -279,7 +347,7 @@ def run_streamlit_app() -> None:
 
                 with c2:
                     st.subheader("Izračun")
-                    if summary["market_avg"] == summary["market_avg"]:
+                    if summary["market_avg"] == summary["market_avg"]:  # ni NaN
                         st.metric("Povprečna tržna cena", f"€ {summary['market_avg']:.2f}", help=f"Vir: {src}")
                     else:
                         st.metric("Povprečna tržna cena", "N/A", help=f"Vir: {src}")
@@ -291,22 +359,60 @@ def run_streamlit_app() -> None:
                         st.metric("Potencialni dobiček", "N/A")
                         st.metric("ROI", "N/A")
 
+                st.markdown("#### 🏆 Najboljša ponudba")
+                colA, colB, colC = st.columns(3)
+                with colA:
+                    if best_buy:
+                        st.metric("Najnižja aktivna (za nakup)", f"€ {best_buy['price']:.2f}", help=best_buy.get('source',''))
+                        st.link_button("Odpri ponudbo", best_buy.get("url", ""))
+                    else:
+                        st.write("Ni aktivnih ponudb.")
+                with colB:
+                    if best_sell:
+                        st.metric("Najvišja 'Sold' (cilj prodaje)", f"€ {best_sell['price']:.2f}", help=best_sell.get('source',''))
+                        st.link_button("Odpri referenco", best_sell.get("url", ""))
+                    else:
+                        st.write("Ni 'Sold' referenc.")
+                with colC:
+                    if best_buy and best_sell:
+                        spread = best_sell["price"] - best_buy["price"]
+                        st.metric("Spread (gross)", f"€ {spread:.2f}")
+                    else:
+                        st.metric("Spread (gross)", "N/A")
+
                 decision = (
-                    "GO ✅"
-                    if (summary["profit"] == summary["profit"] and summary["profit"] >= min_profit and summary["roi"] >= min_roi)
-                    else "PASS ❌"
+                    "GO ✅" if (
+                        summary["profit"] == summary["profit"]
+                        and summary["profit"] >= min_profit
+                        and summary["roi"] >= min_roi
+                    ) else "PASS ❌"
                 )
                 st.success(f"Odločitev: **{decision}** · Cilji: dobiček ≥ €{min_profit:.0f}, ROI ≥ {min_roi:.0f}%")
 
         st.caption("⚠️ Dinamična spletna mesta se spreminjajo. Če se parsing pokvari, posodobi selektorje v kodi.")
+
     except Exception as e:
-        st.error("Pri renderju je prišlo do napake. Sled napake:")
+        st.error("Pri renderju je prišlo do napake. Spodaj je sled napake (copy-paste za mene):")
+        st.exception(e)
+
+    except Exception as e:
+        st.error("Pri renderju je prišlo do napake. Spodaj je sled napake (copy-paste za mene):")
         st.exception(e)
 
 
-# --------------------------- CLI ---------------------------
+# --------------------------------------------------------------
+# CLI način
+# --------------------------------------------------------------
+
+def _print_cli_examples() -> None:
+    print("\nUporaba (primeri):")
+    print("  python flip_app.py --query \"iPhone 12 64GB\" --listing-price 180 --shipping 5 --fees-pct 12 --extra-costs 10")
+    print("  python flip_app.py --url \"https://primer.si/oglas\" --listing-price 180 --shipping 5 --fees-pct 12 --extra-costs 10")
+    print("  python flip_app.py --run-tests")
+
+
 def _interactive_prompt() -> Optional[str]:
-    """Only prompt if terminal is TTY (never in Cloud)."""
+    """Ponudi interaktivni vnos samo, če je STDIN TTY (da ne zablokira v oblaku)."""
     try:
         if sys.stdin and sys.stdin.isatty():
             print("[?] Manjkajo argumenti --query/--url. Vnesi ime/model (pusti prazno za preklic):")
@@ -317,66 +423,55 @@ def _interactive_prompt() -> Optional[str]:
     return None
 
 
-def _should_run_streamlit() -> bool:
-    if not STREAMLIT_AVAILABLE:
-        return False
-    # Prefer Streamlit UI in non-interactive environments (Cloud)
-    try:
-        from streamlit.runtime.scriptrunner import get_script_run_ctx  # type: ignore
-        if get_script_run_ctx() is not None:
-            return True
-    except Exception:
-        pass
-    if os.environ.get("STREAMLIT_SERVER_PORT") or os.environ.get("STREAMLIT_SERVER_ENABLED"):
-        return True
-    if not (sys.stdin and sys.stdin.isatty()):
-        return True
-    return False
-
-
 def run_cli() -> None:
-    parser = argparse.ArgumentParser(description="Price compare + ROI (CLI)")
+    parser = argparse.ArgumentParser(description="Price compare + ROI (CLI)", add_help=True)
     src = parser.add_mutually_exclusive_group()
-    src.add_argument("--query", type=str)
-    src.add_argument("--url", type=str)
-    parser.add_argument("--listing-price", type=float, default=0.0)
-    parser.add_argument("--shipping", type=float, default=5.0)
-    parser.add_argument("--fees-pct", type=float, default=12.0)
-    parser.add_argument("--extra-costs", type=float, default=10.0)
-    parser.add_argument("--min-profit", type=float, default=40.0)
-    parser.add_argument("--min-roi", type=float, default=20.0)
-    parser.add_argument("--limit", type=int, default=10)
-    parser.add_argument("--save-csv", type=str, default=None)
-    parser.add_argument("--run-tests", action="store_true")
-    args, _ = parser.parse_known_args()
+    src.add_argument("--query", type=str, help="Ime/model izdelka (npr. 'iPhone 12 64GB')")
+    src.add_argument("--url", type=str, help="URL oglasa (poskusi prebrati naslov strani)")
+
+    parser.add_argument("--listing-price", type=float, default=0.0, help="Cena oglasa (EUR)")
+    parser.add_argument("--shipping", type=float, default=5.0, help="Poštnina (EUR)")
+    parser.add_argument("--fees-pct", type=float, default=12.0, help="Provizije (%)")
+    parser.add_argument("--extra-costs", type=float, default=10.0, help="Dodatni stroški (EUR)")
+
+    parser.add_argument("--min-profit", type=float, default=40.0, help="Ciljni dobiček (EUR)")
+    parser.add_argument("--min-roi", type=float, default=20.0, help="Ciljni ROI (%)")
+
+    parser.add_argument("--limit", type=int, default=10, help="Max zadetkov iz vsakega vira")
+    parser.add_argument("--save-csv", type=str, default=None, help="Shrani comps v CSV datoteko")
+    parser.add_argument("--run-tests", action="store_true", help="Zaženi vgrajene enote teste in izhod")
+
+    args, _unknown = parser.parse_known_args()
 
     if args.run_tests:
         run_tests()
         return
 
-    q = args.query
-    if not q and args.url:
-        q = get_title_from_url(args.url)
-        if not q:
+    query = args.query
+
+    if not query and args.url:
+        query = get_title_from_url(args.url)
+        if not query:
             print("[!] Naslova iz URL ni bilo mogoče prebrati.")
-            q = _interactive_prompt()
-            if not q:
-                print("Primeri:\n  python flip_app.py --query \"iPhone 12 64GB\"")
+            query = _interactive_prompt()
+            if not query:
+                _print_cli_examples()
                 return
 
-    if not q and not args.url:
-        q = _interactive_prompt()
-        if not q:
-            print("Primeri:\n  python flip_app.py --query \"iPhone 12 64GB\"")
+    if not query and not args.url:
+        query = _interactive_prompt()
+        if not query:
+            print("[!] Ni bilo vnosa.")
+            _print_cli_examples()
             return
 
-    print(f"[i] Iskanje compov za: {q}")
+    print(f"[i] Iskanje compov za: {query}")
     comps: List[Dict] = []
-    comps += search_ebay(q, sold=True, limit=args.limit)
+    comps += search_ebay(query, sold=True, limit=args.limit)
     time.sleep(0.2)
-    comps += search_ebay(q, sold=False, limit=args.limit)
+    comps += search_ebay(query, sold=False, limit=args.limit)
     time.sleep(0.2)
-    comps += search_bolha(q, limit=args.limit)
+    comps += search_bolha(query, limit=args.limit)
 
     if not comps:
         print("[!] Ni najdenih primerjav.")
@@ -386,7 +481,11 @@ def run_cli() -> None:
     costs = DealCosts(args.listing_price, args.shipping, args.fees_pct, args.extra_costs)
     summary = roi_summary(costs, avg)
 
-    print("\n=== Povzetek ===")
+    best_buy = best_active_offer(comps)
+    best_sell = best_sold_offer(comps)
+
+    print("
+=== Povzetek ===")
     print(f"Vir povprečja: {src}")
     if summary["market_avg"] == summary["market_avg"]:
         print(f"Povprečna tržna cena: € {summary['market_avg']:.2f}")
@@ -400,11 +499,50 @@ def run_cli() -> None:
         print("Potencialni dobiček:  N/A")
         print("ROI:                  N/A")
 
+    if best_buy:
+        print(f"Najnižja aktivna (za nakup): € {best_buy['price']:.2f} · {best_buy.get('source','')} · {best_buy.get('url','')}")
+    else:
+        print("Najnižja aktivna (za nakup): N/A")
+    if best_sell:
+        print(f"Najvišja 'Sold' (cilj prodaje): € {best_sell['price']:.2f} · {best_sell.get('source','')} · {best_sell.get('url','')}")
+    else:
+        print("Najvišja 'Sold' (cilj prodaje): N/A")
 
-# --------------------------- Tests ---------------------------
+    decision = (
+        "GO ✅" if (
+            summary["profit"] == summary["profit"]
+            and summary["profit"] >= args.min_profit
+            and summary["roi"] >= args.min_roi
+        ) else "PASS ❌"
+    )
+    print(f"Odločitev: {decision} · Cilji: dobiček ≥ €{args.min_profit:.0f}, ROI ≥ {args.min_roi:.0f}%
+")
+
+    if args.save_csv:
+        if not PANDAS_AVAILABLE:
+            print("[!] pandas ni na voljo – CSV ne bo shranjen. Namesti z: pip install pandas")
+        else:
+            df = pd.DataFrame(comps)
+            df.to_csv(args.save_csv, index=False)
+            print(f"[✓] Shranjeno: {args.save_csv}")
+
+    if args.save_csv:
+        if not PANDAS_AVAILABLE:
+            print("[!] pandas ni na voljo – CSV ne bo shranjen. Namesti z: pip install pandas")
+        else:
+            df = pd.DataFrame(comps)
+            df.to_csv(args.save_csv, index=False)
+            print(f"[✓] Shranjeno: {args.save_csv}")
+
+
+# --------------------------------------------------------------
+# TESTI (brez mreže) – zaženemo z: python flip_app.py --run-tests
+# --------------------------------------------------------------
+
 def run_tests() -> None:
     print("[tests] Začenjam teste…")
-    # clean_price basic
+
+    # clean_price – osnovni primeri
     cases = {
         "€ 1.234,56": 1234.56,
         "$1,299.99": 1299.99,
@@ -415,9 +553,9 @@ def run_tests() -> None:
     }
     for raw, exp in cases.items():
         got = clean_price(raw)
-        assert (got == exp) or (got is None and exp is None), f"clean_price('{raw}') -> {got}, expected {exp}"
+        assert (got == exp) or (got is None and exp is None), f"clean_price('{raw}') -> {got}, pričakovano {exp}"
 
-    # extra edges
+    # clean_price – dodatni robni primeri
     extra_cases = {
         "CHF 1'249.00": 1249.0,
         "£79.99": 79.99,
@@ -429,51 +567,75 @@ def run_tests() -> None:
     }
     for raw, exp in extra_cases.items():
         got = clean_price(raw)
-        assert (got == exp) or (got is None and exp is None), f"clean_price('{raw}') -> {got}, expected {exp}"
+        assert (got == exp) or (got is None and exp is None), f"clean_price('{raw}') -> {got}, pričakovano {exp}"
 
-    # market_average prefers Sold
+    # market_average – preferira Sold
     comps_all = [
         {"price": 200, "source": "eBay Active"},
         {"price": 210, "source": "eBay Active"},
         {"price": 190, "source": "eBay Sold"},
     ]
     avg, src = market_average(comps_all)
-    assert round(avg, 2) == 190.00 and src == "eBay Sold"
+    assert round(avg, 2) == 190.00 and src == "eBay Sold", f"market_average -> {avg}, {src}"
 
-    # market_average with only active
+    # market_average – brez Sold, vzemi povprečje vseh
     comps_active = [
         {"price": 100, "source": "eBay Active"},
         {"price": 150, "source": "eBay Active"},
     ]
     avg2, src2 = market_average(comps_active)
-    assert round(avg2, 2) == 125.00 and src2 == "Vse najdbe"
+    assert round(avg2, 2) == 125.00 and src2 == "Vse najdbe", f"market_average (active only) -> {avg2}, {src2}"
 
-    # market_average empty
+    # market_average – prazno
     avg3, src3 = market_average([])
-    assert avg3 is None and src3 == "Ni compov"
+    assert avg3 is None and src3 == "Ni compov", f"market_average (empty) -> {avg3}, {src3}"
 
-    # roi_summary standard
+    # roi_summary – standardni primer
     costs = DealCosts(listing_price=150, shipping=5, fees_pct=10, extra_costs=5)
     summary = roi_summary(costs, market_avg=220)
+    # fees = 15, total = 175, profit = 45, roi ≈ 25.714%
     assert round(summary["est_fees"], 2) == 15.00
     assert round(summary["total_cost"], 2) == 175.00
     assert round(summary["profit"], 2) == 45.00
     assert round(summary["roi"], 2) == 25.71
-    print("[tests] OK ✅")
+
+    # roi_summary – total_cost == 0 (ROI mora biti NaN)
+    zero_costs = DealCosts(listing_price=0, shipping=0, fees_pct=0, extra_costs=0)
+    summary2 = roi_summary(zero_costs, market_avg=100)
+    assert summary2["total_cost"] == 0
+    assert summary2["roi"] != summary2["roi"], "ROI naj bo NaN, ko je total_cost 0"
+
+    # NEW: best offer helpers
+    sample = [
+        {"price": 120, "source": "eBay Active", "url": "a"},
+        {"price": 110, "source": "Bolha (active)", "url": "b"},
+        {"price": 180, "source": "eBay Sold", "url": "c"},
+        {"price": 175, "source": "eBay Sold", "url": "d"},
+    ]
+    ba = best_active_offer(sample)
+    bs = best_sold_offer(sample)
+    assert ba and ba["price"] == 110, f"best_active_offer -> {ba}" 
+    assert bs and bs["price"] == 180, f"best_sold_offer -> {bs}"
+
+    print("[tests] Vsi testi so OK ✅")
 
 
-# --------------------------- Entrypoint ---------------------------
+# --------------------------------------------------------------
+# Vstopna točka
+# --------------------------------------------------------------
 if __name__ == "__main__":
-    if STREAMLIT_AVAILABLE and (
-        # In Streamlit runner
-        (lambda: (
-            __import__("importlib").import_module("streamlit.runtime.scriptrunner").get_script_run_ctx() is not None
-        ))() if True else False
-    ):
-        run_streamlit_app()
-    else:
-        # Prefer UI in non-interactive environments
-        if STREAMLIT_AVAILABLE and not (sys.stdin and sys.stdin.isatty()):
+    # Če je Streamlit na voljo, preveri ali tečemo znotraj streamlit runnerja
+    if 'st' in globals() and STREAMLIT_AVAILABLE:
+        in_streamlit = False
+        try:
+            from streamlit.runtime.scriptrunner import get_script_run_ctx  # type: ignore
+            in_streamlit = get_script_run_ctx() is not None
+        except Exception:
+            # Fallback: če stdin NI TTY (npr. oblak), predpostavi Streamlit okolje
+            in_streamlit = not (sys.stdin and sys.stdin.isatty())
+        if in_streamlit:
             run_streamlit_app()
         else:
             run_cli()
+    else:
+        run_cli()
